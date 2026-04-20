@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OBJ Model</title>
+  <title>OBJ Model Debug</title>
   <style>
     html, body {
       margin: 0;
@@ -22,11 +22,12 @@
       left: 12px;
       color: white;
       font-family: Arial, sans-serif;
-      background: rgba(0,0,0,0.55);
-      padding: 8px 12px;
-      border-radius: 8px;
+      background: rgba(0,0,0,0.6);
+      padding: 10px 12px;
+      border-radius: 10px;
       z-index: 10;
       white-space: pre-line;
+      line-height: 1.4;
     }
   </style>
 </head>
@@ -52,6 +53,60 @@
     const MTL_PATH = 'Meshy_AI_Blue_Ice_Tie_Dye_Tank_0416212302_texture.mtl';
 
     const info = document.getElementById('info');
+
+    let objTextStats = {
+      v: 0,
+      vt: 0,
+      vn: 0,
+      f: 0
+    };
+
+    let objLoaderStats = {
+      meshCount: 0,
+      sizeX: 0,
+      sizeY: 0,
+      sizeZ: 0
+    };
+
+    function updateInfo(extra = '') {
+      info.textContent =
+        'OBJ text kontrol\n' +
+        'v: ' + objTextStats.v + '\n' +
+        'vt: ' + objTextStats.vt + '\n' +
+        'vn: ' + objTextStats.vn + '\n' +
+        'f: ' + objTextStats.f + '\n\n' +
+        'OBJLoader sonucu\n' +
+        'mesh: ' + objLoaderStats.meshCount + '\n' +
+        'boyut: ' +
+        objLoaderStats.sizeX.toFixed(2) + ', ' +
+        objLoaderStats.sizeY.toFixed(2) + ', ' +
+        objLoaderStats.sizeZ.toFixed(2) +
+        (extra ? '\n\n' + extra : '');
+    }
+
+    fetch(OBJ_PATH)
+      .then(r => r.text())
+      .then(text => {
+        console.log('OBJ ilk 500 karakter:');
+        console.log(text.slice(0, 500));
+
+        const lines = text.split('\n');
+        objTextStats.v = lines.filter(line => line.startsWith('v ')).length;
+        objTextStats.vt = lines.filter(line => line.startsWith('vt ')).length;
+        objTextStats.vn = lines.filter(line => line.startsWith('vn ')).length;
+        objTextStats.f = lines.filter(line => line.startsWith('f ')).length;
+
+        console.log('OBJ vertex:', objTextStats.v);
+        console.log('OBJ uv:', objTextStats.vt);
+        console.log('OBJ normal:', objTextStats.vn);
+        console.log('OBJ face:', objTextStats.f);
+
+        updateInfo('OBJ text okundu');
+      })
+      .catch(err => {
+        console.error('OBJ text okunamadı:', err);
+        updateInfo('OBJ text okunamadı');
+      });
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x111111);
@@ -143,41 +198,39 @@
             scene.add(object);
 
             const result = fitCameraToObject(object);
-
             const helper = new THREE.Box3Helper(result.box, 0xff0000);
             scene.add(helper);
+
+            objLoaderStats.meshCount = meshCount;
+            objLoaderStats.sizeX = result.size.x;
+            objLoaderStats.sizeY = result.size.y;
+            objLoaderStats.sizeZ = result.size.z;
 
             console.log('mesh count:', meshCount);
             console.log('size:', result.size);
             console.log('center:', result.center);
             console.log('maxDim:', result.maxDim);
 
-            info.textContent =
-              'Model yüklendi\n' +
-              'Mesh sayısı: ' + meshCount + '\n' +
-              'Boyut: ' +
-              result.size.x.toFixed(2) + ', ' +
-              result.size.y.toFixed(2) + ', ' +
-              result.size.z.toFixed(2);
+            updateInfo('Model yüklendi');
           },
           (xhr) => {
             if (xhr.total) {
               const p = ((xhr.loaded / xhr.total) * 100).toFixed(0);
-              info.textContent = 'Model yükleniyor... %' + p;
+              updateInfo('Model yükleniyor... %' + p);
             } else {
-              info.textContent = 'Model yükleniyor...';
+              updateInfo('Model yükleniyor...');
             }
           },
           (error) => {
             console.error('OBJ yükleme hatası:', error);
-            info.textContent = 'OBJ yükleme hatası';
+            updateInfo('OBJ yükleme hatası');
           }
         );
       },
       undefined,
       (error) => {
         console.error('MTL yükleme hatası:', error);
-        info.textContent = 'MTL yükleme hatası';
+        updateInfo('MTL yükleme hatası');
       }
     );
 
