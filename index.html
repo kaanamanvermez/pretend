@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cloth Physics Template</title>
+<!--
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║  CLOTH PHYSICS TEMPLATE — Three.js r0.164.1                     ║
+  ║  Hazır kumaş fizik sistemi. Kendi GLB + texture ile kullanmak   ║
+  ║  için aşağıdaki 2 satırı değiştir:                              ║
+  ║    GLB_PATH    → kendi .glb dosyanın yolu                       ║
+  ║    TEX_PATH    → kendi texture dosyanın yolu (.webp/.png/.jpg)  ║
+  ╚══════════════════════════════════════════════════════════════════╝
+
+  ── FİZİK PARAMETRELERİ (tick() içinde) ────────────────────────────
+  angVel decay   → Math.pow(0.974, fps60)   — dönüş sönümleme
+  lagTarget      → -P.angVel * 3.0          — burulma miktarı
+  lagVel damp    → Math.pow(0.88, fps60)    — burulma sönümleme
+  oscVel kick    → angAcc * 7.0             — ikincil salınım şiddeti
+  oscSpring      → 18.0                     — geri dönüş yayı
+  oscVel damp    → Math.pow(0.90, fps60)    — salınım sönümleme
+  wrinkleAmp     → lagAngle*0.25 + oscAngle*0.18 + 0.006
+  wave clamp     → clamp(uWrinkleAmp, 0.0, 0.04)  ← max şişme sınırı
+  flick sens     → avgDx * 0.0018           — dokunma hassasiyeti
+
+  ── SHADER WRINKLE FREKANSLAR ──────────────────────────────────────
+  w1: v*9, u*5   (orta frekans, çift eksenli)
+  w2: v*5.5, u*8 (düşük frekans, çift eksenli)
+  w3: v*13, u*2  (yüksek frekans, tek eksenli, x0.45 zayıf)
+  Karışım: w1*0.50 + w2*0.33 + w3*0.17
+
+  ── UV PROJEKSİYON ─────────────────────────────────────────────────
+  GLB'de UV yoksa otomatik silindirik projeksiyon uygulanır.
+  u = atan2(z,x)/(2π)+0.5   v = 1-(y-yMin)/yHeight
+-->
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0d0d0d; overflow:hidden; }
+  canvas { display:block; }
+  #hint {
+    position:fixed; bottom:26px; left:50%; transform:translateX(-50%);
+    color:rgba(255,255,255,0.18); font:11px/1 'Helvetica Neue',sans-serif;
+    letter-spacing:.18em; pointer-events:none; text-transform:uppercase;
+  }
+  #loader {
+    position:fixed; inset:0; background:#0d0d0d; z-index:99;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    transition:opacity .5s;
+  }
+  #bar-bg { width:180px; height:2px; background:rgba(255,255,255,.08); border-radius:2px; }
+  #bar    { height:100%; width:0; background:#fff; border-radius:2px; transition:width .15s; }
+  #ltxt   { color:rgba(255,255,255,.25); font:10px/1 'Helvetica Neue',sans-serif; letter-spacing:.2em; }
+</style>
+</head>
+<body>
+<div id="loader"><div id="bar-bg"><div id="bar"></div></div><div id="ltxt">LOADING</div></div>
+<div id="hint">← drag to rotate →</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"}}
+</script>
+<script>
+window.addEventListener('error', e => {
+  document.getElementById('ltxt').textContent = 'JS ERROR: ' + e.message;
+  document.getElementById('loader').style.opacity = '1';
+  document.getElementById('loader').style.display = 'flex';
+});
+window.addEventListener('unhandledrejection', e => {
+  document.getElementById('ltxt').textContent = 'PROMISE ERROR: ' + e.reason;
+});
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ══════════════════════════════════════════════════════════════════
+//  DEĞİŞTİR — kendi dosya yollarını buraya yaz
+// ══════════════════════════════════════════════════════════════════
+const GLB_PATH = 'YOUR_MODEL.glb';      // ← kendi GLB dosyan
+const TEX_PATH = 'YOUR_TEXTURE.webp';   // ← kendi texture dosyan
+// ══════════════════════════════════════════════════════════════════
+
+// ─── RENDERER ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d0d);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.01, 100);
+camera.position.set(0, 0.05, 2.8);
+camera.lookAt(0, 0, 0);
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── LIGHTS ──────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+
+const keyL = new THREE.DirectionalLight(0xfff6ee, 2.4);
+keyL.position.set(1.5, 3, 2.5);
+scene.add(keyL);
+
+const fillL = new THREE.DirectionalLight(0xc4d4ff, 0.85);
+fillL.position.set(-2, 0.5, -1); scene.add(fillL);
+
+const rimL = new THREE.DirectionalLight(0xffffff, 1.5);
+rimL.position.set(0, 1.5, -3); scene.add(rimL);
+
+const underL = new THREE.PointLight(0x7799ff, 0.4, 5);
+underL.position.set(0, -1.5, 0.5);
+scene.add(underL);
+
+// ─── FLICK INPUT ─────────────────────────────────────────────────────────────
+let prevX = 0;
+const velSamples = [];
+const MAX_SAMPLES = 5;
+let lastMoveTime = 0;
+
+function onStart(x) { prevX = x; velSamples.length = 0; initAudio(); }
+function onMove(x) {
+  const now = performance.now();
+  const dx = x - prevX; prevX = x;
+  if (Math.abs(dx) < 1) return;
+  velSamples.push({ dx, t: now });
+  if (velSamples.length > MAX_SAMPLES) velSamples.shift();
+  lastMoveTime = now;
+}
+function onEnd() {
+  const now = performance.now();
+  if (now - lastMoveTime > 150) { velSamples.length = 0; return; }
+  if (velSamples.length === 0) return;
+  const avgDx = velSamples.reduce((s,v)=>s+v.dx,0) / velSamples.length;
+  P.angVel += avgDx * 0.0018;   // ← hassasiyet
+  velSamples.length = 0;
+}
+
+const el = renderer.domElement;
+el.addEventListener('mousedown',  e => onStart(e.clientX));
+window.addEventListener('mouseup',   () => onEnd());
+window.addEventListener('mousemove', e => { if(e.buttons===1) onMove(e.clientX); });
+el.addEventListener('touchstart',  e => onStart(e.touches[0].clientX), {passive:true});
+window.addEventListener('touchend',   () => onEnd());
+window.addEventListener('touchmove',  e => onMove(e.touches[0].clientX), {passive:true});
+
+// ─── COTTON NORMAL MAP ───────────────────────────────────────────────────────
+function makeCottonNormal() {
+  const S=512, cv=document.createElement('canvas');
+  cv.width=cv.height=S;
+  const ctx=cv.getContext('2d');
+  ctx.fillStyle='#8080ff'; ctx.fillRect(0,0,S,S);
+  for(let i=0;i<16000;i++){
+    const x=Math.random()*S, y=Math.random()*S;
+    const len=2+Math.random()*8, angle=Math.random()*Math.PI;
+    const v=108+Math.floor(Math.random()*52);
+    ctx.strokeStyle=`rgb(${v},${v},255)`;
+    ctx.lineWidth=0.3+Math.random()*0.8;
+    ctx.beginPath(); ctx.moveTo(x,y);
+    ctx.lineTo(x+Math.cos(angle)*len, y+Math.sin(angle)*len);
+    ctx.stroke();
+  }
+  const t=new THREE.CanvasTexture(cv);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(2,2);
+  return t;
+}
+const cottonNormal = makeCottonNormal();
+
+// ─── PHYSICS STATE ───────────────────────────────────────────────────────────
+const P = {
+  angVel: 0, rotY: 0, prevAngVel: 0,
+  lagAngle: 0, lagVel: 0,   // torsional lag
+  oscAngle: 0, oscVel: 0,   // secondary oscillation
+  idleA: 0, idleB: 0,       // idle micro-sway phases
+  wrinkle: 0.28,
+};
+
+const shaderUniforms = [];
+
+// ─── CLOTH VERTEX SHADER ─────────────────────────────────────────────────────
+const CLOTH_VERT_DECL = `
+  uniform float uWrinkleAmp;
+  uniform float uPhase;
+  uniform float uIdlePhase;
+  uniform float uYMin;
+  uniform float uYHeight;
+`;
+
+const CLOTH_VERT_BODY = `
+  float clothT = clamp((transformed.y - uYMin) / uYHeight, 0.0, 1.0);
+  float botW   = 1.0 - clothT;
+  float u = uv.x;
+  float v = uv.y;
+
+  float w1 = sin(v * 9.0  + uPhase * 1.0  + u * 5.0)
+           * cos(u * 6.0  + uPhase * 0.6  + 0.8);
+  float w2 = sin(v * 5.5  + uPhase * 0.73 + u * 3.2 + 1.57)
+           * sin(u * 8.0  + uPhase * 1.3  + 2.1);
+  float w3 = sin(v * 13.0 + uPhase * 1.8  + u * 2.0 + 0.4) * 0.45;
+
+  float wave = (w1 * 0.50 + w2 * 0.33 + w3 * 0.17) * clamp(uWrinkleAmp, 0.0, 0.04) * botW;
+  transformed += normalize(normal) * wave;
+
+  float idle = sin(v * 4.0 + uIdlePhase + u * 3.0) * 0.004 * botW;
+  transformed += normalize(normal) * idle;
+`;
+
+function buildMaterial(fabricTex, yMin, yHeight) {
+  const mat = new THREE.MeshStandardMaterial({
+    map:         fabricTex,
+    normalMap:   cottonNormal,
+    normalScale: new THREE.Vector2(0.3, 0.3),
+    roughness:   0.91,
+    metalness:   0.0,
+    side:        THREE.DoubleSide,
+  });
+  mat.onBeforeCompile = shader => {
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <common>',
+      '#include <common>\n' + CLOTH_VERT_DECL
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <project_vertex>',
+      CLOTH_VERT_BODY + '\n#include <project_vertex>'
+    );
+    shader.uniforms.uWrinkleAmp = { value: 0 };
+    shader.uniforms.uPhase      = { value: 0 };
+    shader.uniforms.uIdlePhase  = { value: 0 };
+    shader.uniforms.uYMin       = { value: yMin };
+    shader.uniforms.uYHeight    = { value: yHeight };
+    mat.userData.shader = shader;
+    shaderUniforms.push(shader.uniforms);
+  };
+  return mat;
+}
+
+// ─── LOAD TEXTURE ────────────────────────────────────────────────────────────
+const fabricTex = new THREE.TextureLoader().load(TEX_PATH, tex => {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+});
+
+// ─── PIVOT + GLB ─────────────────────────────────────────────────────────────
+const pivot = new THREE.Group();
+scene.add(pivot);
+
+const bar = document.getElementById('bar');
+const ldr = document.getElementById('loader');
+
+new GLTFLoader().load(
+  GLB_PATH,
+  gltf => {
+    const model = gltf.scene;
+    const box  = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const s    = 1.7 / Math.max(size.x, size.y, size.z);
+    model.scale.setScalar(s);
+    const box2 = new THREE.Box3().setFromObject(model);
+    model.position.sub(box2.getCenter(new THREE.Vector3()));
+    const box3   = new THREE.Box3().setFromObject(model);
+    const yMin   = box3.min.y;
+    const yHeight = box3.max.y - yMin;
+
+    model.traverse(child => {
+      if (!child.isMesh) return;
+      child.castShadow = child.receiveShadow = true;
+      const geo = child.geometry;
+
+      // Cylindrical UV — GLB'de UV yoksa otomatik üretilir
+      if (!geo.attributes.uv) {
+        const pos  = geo.attributes.position;
+        const uvArr = new Float32Array(pos.count * 2);
+        for (let i = 0; i < pos.count; i++) {
+          uvArr[i*2]   = Math.atan2(pos.getZ(i), pos.getX(i)) / (Math.PI*2) + 0.5;
+          uvArr[i*2+1] = 1.0 - (pos.getY(i) - yMin) / yHeight;
+        }
+        geo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+      }
+      geo.computeVertexNormals();
+      child.material = buildMaterial(fabricTex, yMin, yHeight);
+    });
+
+    pivot.add(model);
+    ldr.style.opacity = '0';
+    setTimeout(() => ldr.style.display = 'none', 600);
+  },
+  xhr => {
+    const pct = xhr.total ? xhr.loaded/xhr.total*100 : (xhr.loaded/500000*100);
+    bar.style.width = Math.min(pct, 95)+'%';
+  },
+  err => {
+    document.getElementById('ltxt').textContent = 'GLB ERROR: ' + (err.message||err);
+  }
+);
+
+// ─── AUDIO ───────────────────────────────────────────────────────────────────
+let actx=null, gainN=null, filterN=null;
+function initAudio() {
+  if (actx) return;
+  try {
+    actx    = new (window.AudioContext||window.webkitAudioContext)();
+    gainN   = actx.createGain(); gainN.gain.value = 0;
+    filterN = actx.createBiquadFilter();
+    filterN.type='bandpass'; filterN.frequency.value=650; filterN.Q.value=0.6;
+    const sr=actx.sampleRate, buf=actx.createBuffer(1,sr*2,sr), d=buf.getChannelData(0);
+    for(let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*0.25;
+    const src=actx.createBufferSource(); src.buffer=buf; src.loop=true;
+    src.connect(filterN); filterN.connect(gainN); gainN.connect(actx.destination);
+    src.start();
+  } catch(e) {}
+}
+
+// ─── RENDER LOOP ─────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt    = Math.min(clock.getDelta(), 0.05);
+  const fps60 = dt * 60;
+
+  P.angVel *= Math.pow(0.974, fps60);
+  P.rotY   += P.angVel;
+  pivot.rotation.y = P.rotY;
+  const spd    = Math.abs(P.angVel);
+  const angAcc = P.angVel - P.prevAngVel;
+  P.prevAngVel = P.angVel;
+
+  // Torsional lag
+  const lagTarget = -P.angVel * 3.0;
+  P.lagVel += (lagTarget - P.lagAngle) * dt * 6.0;
+  P.lagVel *= Math.pow(0.88, fps60);
+  P.lagAngle += P.lagVel * dt;
+
+  // Secondary oscillation
+  P.oscVel += angAcc * 7.0;
+  P.oscVel += -P.oscAngle * 18.0 * dt;
+  P.oscVel *= Math.pow(0.90, fps60);
+  P.oscAngle += P.oscVel * dt;
+
+  P.idleA += dt * (0.9 + spd * 3.0);
+  P.idleB += dt * 0.55;
+  const wrinkleAmp = Math.abs(P.lagAngle) * 0.25 + Math.abs(P.oscAngle) * 0.18 + 0.006;
+
+  P.wrinkle += (0.28 + spd * 0.2 + Math.abs(P.lagAngle)*0.3 - P.wrinkle) * dt * 5.0;
+
+  for (const u of shaderUniforms) {
+    u.uWrinkleAmp.value = wrinkleAmp;
+    u.uPhase.value      = P.idleA;
+    u.uIdlePhase.value  = P.idleB;
+  }
+  pivot.traverse(c => {
+    if (c.isMesh && c.material?.normalScale)
+      c.material.normalScale.set(P.wrinkle, P.wrinkle);
+  });
+
+  if (gainN) {
+    gainN.gain.setTargetAtTime(Math.min(spd*0.02, 0.045), actx.currentTime, 0.12);
+    filterN.frequency.setTargetAtTime(420+spd*230, actx.currentTime, 0.18);
+  }
+
+  renderer.render(scene, camera);
+}
+
+tick();
+</script>
+</body>
+</html>
